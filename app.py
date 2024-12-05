@@ -1,6 +1,9 @@
 import os
 from collections import defaultdict
 import math
+import gradio as gr
+import pandas as pd
+# from typing import Tuple, List
 
 
 def parse_model_names(cache_dir: str) -> dict[str, list[str]]:
@@ -49,49 +52,115 @@ def get_directory_size(path: str) -> int:
 
 def format_size(size_bytes: int) -> str:
     """
-    Format size in bytes to human readable format.
+    Format size in bytes to GB.
 
     Args:
         size_bytes: Size in bytes
 
     Returns:
-        Formatted string with appropriate unit
+        Formatted string in GB
     """
     if size_bytes == 0:
-        return "0 B"
+        return "0 GB"
 
-    units = ["B", "KB", "MB", "GB", "TB"]
-    exponent = int(math.log(size_bytes, 1024))
-    unit = units[min(exponent, len(units) - 1)]
-    size = size_bytes / (1024**exponent)
-    return f"{size:.2f} {unit}"
+    size_gb = size_bytes / (1024**3)  # Convert to GB
+    return f"{size_gb:.2f} GB"
 
 
-def main():
-    # Retrieve the Hugging Face cache directory
+def get_models_data() -> tuple[pd.DataFrame, str]:
+    """
+    Get models data as a pandas DataFrame and total size.
+
+    Returns:
+        Tuple of (DataFrame with model info, total size string)
+    """
     cache_dir = os.getenv("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
-    print(f"Hugging Face model cache directory: {cache_dir}")
     huggingface_hub_cache_dir = cache_dir + "/hub"
 
     # Get models organized by organization
     models = parse_model_names(huggingface_hub_cache_dir)
 
-    print("\nHugging Face Models by Organization and Size:")
-    print("===========================================")
+    # Prepare data for DataFrame
+    data = []
     total_size = 0
 
     for org, model_list in sorted(models.items()):
-        print(f"\n{org}:")
-        org_size = 0
         for model in sorted(model_list):
             model_dir = os.path.join(huggingface_hub_cache_dir, f"models--{org}--{model}")
             size = get_directory_size(model_dir)
-            org_size += size
             total_size += size
-            print(f"  - {model}: {format_size(size)}")
-        print(f"  Total organization size: {format_size(org_size)}")
+            data.append(
+                {
+                    "Organization": org,
+                    "Model": model,
+                    "Size": format_size(size),
+                    "Raw Size": size,  # For sorting
+                }
+            )
 
-    print(f"\nTotal disk space used by all models: {format_size(total_size)}")
+    df = pd.DataFrame(data)
+    return df, format_size(total_size)
+
+
+def filter_models(organization: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Filter models by organization"""
+    if organization == "All Organizations":
+        return df
+    return df[df["Organization"] == organization]
+
+
+def create_interface():
+    # Get initial data
+    df, total_size = get_models_data()
+
+    def refresh_data():
+        new_df, new_total = get_models_data()
+        orgs = ["All Organizations"] + sorted(new_df["Organization"].unique().tolist())
+        return new_df, new_total, gr.Dropdown(choices=orgs, value="All Organizations")
+
+    def update_table(org: str, df: pd.DataFrame):
+        filtered_df = filter_models(org, df)
+        org_total = format_size(filtered_df["Raw Size"].sum())
+        return filtered_df[["Organization", "Model", "Size"]], org_total
+
+    with gr.Blocks(title="Hugging Face Model Cache Viewer") as interface:
+        gr.Markdown("# 🤗 Hugging Face Model Cache Viewer")
+
+        with gr.Row():
+            with gr.Column():
+                refresh_btn = gr.Button("🔄 Refresh Data", variant="primary")
+                total_size_text = gr.Textbox(label="Total Cache Size", value=total_size, interactive=False)
+                org_dropdown = gr.Dropdown(
+                    choices=["All Organizations"] + sorted(df["Organization"].unique().tolist()),
+                    value="All Organizations",
+                    label="Filter by Organization",
+                )
+                org_size_text = gr.Textbox(label="Selected Organization(s) Size", value=total_size, interactive=False)
+
+        table = gr.DataFrame(
+            value=df[["Organization", "Model", "Size"]],
+            headers=["Organization", "Model", "Size"],
+            datatype=["str", "str", "str"],
+            col_count=(3, "fixed"),
+            interactive=False,
+        )
+
+        # Hidden state for the full DataFrame
+        state = gr.State(df)
+
+        # Set up event handlers
+        refresh_btn.click(refresh_data, outputs=[state, total_size_text, org_dropdown]).then(
+            update_table, inputs=[org_dropdown, state], outputs=[table, org_size_text]
+        )
+
+        org_dropdown.change(update_table, inputs=[org_dropdown, state], outputs=[table, org_size_text])
+
+    return interface
+
+
+def main():
+    interface = create_interface()
+    interface.launch(server_name="0.0.0.0", server_port=7860, inbrowser=True)
 
 
 if __name__ == "__main__":
