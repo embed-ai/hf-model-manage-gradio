@@ -158,8 +158,10 @@ def create_interface():
     return interface
 
 
+interface = create_interface()
+
+
 def main():
-    interface = create_interface()
     interface.launch(server_name="0.0.0.0", server_port=7860, inbrowser=True)
 
 
